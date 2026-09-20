@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Установка зависимостей
+        run: npm ci
+
+      - name: Синтаксис файлов расширения
+        run: npm run lint:syntax
+
+      - name: Юнит- и GIF-тесты
+        run: npm test
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # gitleaks ставится из релиза GitHub с зафиксированной версией,
+      # чтобы CI и локальные хуки использовали одну и ту же версию.
+      - name: Установка gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+
+      - name: Скан секретов по всей истории
+        run: ./gitleaks git --config .gitleaks.toml --redact --no-banner

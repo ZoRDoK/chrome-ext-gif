@@ -1,0 +1,16 @@
+{
+  "name": "chrome-ext-gif",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome MV3: запись выделенной области вкладки в GIF и скачивание файла",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/e2e.mjs",
+    "lint:syntax": "node --check background.js && node --check shared.js && node --check capture.js && node --check overlay.js"
+  },
+  "devDependencies": {
+    "omggif": "1.0.10"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "GIF-рекордер вкладки",
+  "version": "0.1.0",
+  "description": "Записывает выделенную область текущей вкладки в GIF и скачивает файл. Локально, без облака, аккаунтов и аналитики.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "scripting",
+    "activeTab",
+    "storage",
+    "downloads"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "GIF-рекордер: выделить область / остановить запись"
+  },
+  "commands": {
+    "toggle-capture": {
+      "suggested_key": {
+        "default": "Alt+Shift+G"
+      },
+      "description": "Выделить область и начать запись GIF / остановить запись"
+    }
+  }
+}

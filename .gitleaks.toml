@@ -1,0 +1,11 @@
+# Конфигурация gitleaks для chrome-ext-gif.
+# !!! Важно: указание --config заменяет встроенный набор правил, поэтому
+# useDefault = true обязателен — иначе скан не проверял бы ничего.
+title = "chrome-ext-gif gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Явные исключения (сейчас пустые — правило добавляется только с обоснованием)"
+paths = []

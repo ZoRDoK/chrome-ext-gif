@@ -1,0 +1,14 @@
+#!/bin/sh
+# Блокирующий pre-push: полная история репозитория, а не только новый пакет.
+# Без gitleaks push не проходит (fail-closed).
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-push: gitleaks не найден — push заблокирован (fail-closed)." >&2
+  exit 1
+fi
+
+echo "pre-push: gitleaks (вся история)..."
+gitleaks git --config .gitleaks.toml --redact --no-banner
+
+echo "pre-push: ok"

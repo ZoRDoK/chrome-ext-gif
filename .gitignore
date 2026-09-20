@@ -1,0 +1,26 @@
+# Зависимости
+node_modules/
+
+# Локальные артефакты записи и тестов
+test-artifacts/
+evidence/
+*.crdownload
+*.gif
+*.webm
+
+# Файлы Pi-агента и локальные профили
+.pi/
+.agent/
+profiles/
+
+# Секреты и окружение
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+
+# Редакторы и ОС
+.DS_Store
+*.swp
+*~

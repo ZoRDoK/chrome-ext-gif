@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>GIF-рекордер: синтетическая тестовая страница</title>
+    <style>
+      body {
+        margin: 0;
+        font: 16px/1.4 system-ui, sans-serif;
+        background: #f8fafc;
+      }
+      /* Синтетическая «страница», попадающая в запись. Все элементы
+         существуют только для теста и не содержат пользовательских данных. */
+      #target {
+        position: absolute;
+        left: 10%;
+        top: 10%;
+        width: 50%;
+        height: 50%;
+        background: #1d4ed8;
+        overflow: hidden;
+      }
+      #mover {
+        position: absolute;
+        top: 40%;
+        width: 15%;
+        height: 20%;
+        background: #facc15;
+        animation: slide 1.2s linear infinite alternate;
+      }
+      @keyframes slide {
+        from {
+          left: 5%;
+        }
+        to {
+          left: 80%;
+        }
+      }
+      h1 {
+        margin: 16px;
+        font-size: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Синтетическая страница для e2e-теста GIF-рекордера</h1>
+    <div id="target"><div id="mover"></div></div>
+  </body>
+</html>

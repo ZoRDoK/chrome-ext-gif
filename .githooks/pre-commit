@@ -1,0 +1,23 @@
+#!/bin/sh
+# Блокирующий pre-commit: без gitleaks коммит не проходит (fail-closed).
+# Сканируются только staged-изменения, чтобы хук оставался быстрым.
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks не найден — коммит заблокирован (fail-closed)." >&2
+  echo "Установите gitleaks или закоммитьте с --no-verify после ручной проверки." >&2
+  exit 1
+fi
+
+echo "pre-commit: gitleaks (staged)..."
+gitleaks git --staged --config .gitleaks.toml --redact --no-banner
+
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.js$' || true)
+if [ -n "$STAGED_JS" ]; then
+  echo "pre-commit: синтаксис staged JS..."
+  for file in $STAGED_JS; do
+    node --check "$file"
+  done
+fi
+
+echo "pre-commit: ok"

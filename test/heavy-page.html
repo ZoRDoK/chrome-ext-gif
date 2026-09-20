@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>GIF-рекордер: тяжёлая синтетическая страница</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0f172a;
+      }
+      /* Высокоэнтропийная синтетическая анимация: нужна только для проверки
+         транспорта больших GIF. Пользовательских данных не содержит. */
+      #heavy-target {
+        position: absolute;
+        left: 80px;
+        top: 40px;
+        width: 512px;
+        height: 512px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="heavy-target" width="512" height="512"></canvas>
+    <script>
+      const canvas = document.getElementById('heavy-target');
+      const context = canvas.getContext('2d');
+
+      const noise = document.createElement('canvas');
+      noise.width = 256;
+      noise.height = 256;
+      const noiseContext = noise.getContext('2d');
+      const image = noiseContext.createImageData(256, 256);
+      let seed = 987654321;
+      for (let offset = 0; offset < image.data.length; offset += 4) {
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        image.data[offset] = seed & 255;
+        image.data[offset + 1] = (seed >> 8) & 255;
+        image.data[offset + 2] = (seed >> 16) & 255;
+        image.data[offset + 3] = 255;
+      }
+      noiseContext.putImageData(image, 0, 0);
+
+      function draw(now) {
+        const shiftX = (now / 11) % 256;
+        const shiftY = (now / 23) % 256;
+        for (let y = -1; y <= canvas.height / 256; y += 1) {
+          for (let x = -1; x <= canvas.width / 256; x += 1) {
+            context.drawImage(noise, x * 256 + shiftX, y * 256 + shiftY);
+          }
+        }
+        context.fillStyle = `hsl(${(now / 8) % 360} 95% 55%)`;
+        context.fillRect((now / 7) % (canvas.width - 96), (now / 13) % (canvas.height - 96), 96, 96);
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+    </script>
+  </body>
+</html>
