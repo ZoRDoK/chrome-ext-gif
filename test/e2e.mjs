@@ -3,7 +3,7 @@
 // страница, скачанные GIF сохраняются в временную папку (не в ~/Downloads).
 //
 // Запуск: NODE_PATH=$(npm root -g) node test/e2e.mjs
-// Проверяются: команда расширения, выделение мышью, таймер в бейдже, остановка,
+// Проверяются: команда расширения, выделение мышью, счётчик на иконке, остановка,
 // скачивание, декодирование GIF независимым декодером, повторный запуск,
 // отмена по Esc и связь CSS-координат с кадром при DPR 1 и 2.
 import assert from 'node:assert/strict';
@@ -45,6 +45,7 @@ const SCENARIOS = [
     full: true,
   },
   { label: 'выделение при DPR 2', viewport: { width: 400, height: 300 }, deviceScaleFactor: 2, scale: 2 },
+  { label: 'детальная область 1280 px', viewport: { width: 2560, height: 1600 }, deviceScaleFactor: 1, scale: 1, detail: true },
 ];
 
 const server = createServer((request, response) => {
@@ -93,6 +94,7 @@ async function runScenario(scenario) {
     acceptDownloads: true,
     downloadsPath: downloadsDir,
     args: [
+      `--window-size=${scenario.viewport.width},${scenario.viewport.height}`,
       `--disable-extensions-except=${projectDir}`,
       `--load-extension=${projectDir}`,
       '--no-first-run',
@@ -103,8 +105,31 @@ async function runScenario(scenario) {
   try {
     const worker =
       context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker', { timeout: 15000 }));
+    await worker.evaluate(() => {
+      const setIcon = chrome.action.setIcon.bind(chrome.action);
+      chrome.action.setIcon = async (details) => {
+        if (!details.imageData) {
+          await setIcon(details);
+          return;
+        }
+        let hash = 0;
+        for (const byte of details.imageData.data) hash = (hash * 31 + byte) | 0;
+        await setIcon(details);
+        globalThis.gifTestIconHash = hash;
+      };
+    });
     const page = await context.newPage();
     await page.goto(pageUrl);
+    if (scenario.detail) {
+      await page.locator('#target').evaluate((target) => {
+        const stripes = document.createElement('div');
+        Object.assign(stripes.style, {
+          position: 'absolute', left: '16px', top: '16px', width: '64px', height: '8px',
+          background: 'repeating-linear-gradient(90deg, white 0 1px, black 1px 2px)',
+        });
+        target.appendChild(stripes);
+      });
+    }
     await page.bringToFront();
 
     const cdp = await context.newCDPSession(page);
@@ -114,6 +139,7 @@ async function runScenario(scenario) {
       worker.evaluate(async () => ({
         badge: await chrome.action.getBadgeText({}),
         title: await chrome.action.getTitle({}),
+        iconHash: globalThis.gifTestIconHash,
       }));
 
     const box = await page.locator('#target').boundingBox();
@@ -147,6 +173,7 @@ async function runScenario(scenario) {
     await checkRestrictedPageError({ context, page, overlay, actionState, pressShortcut });
 
     if (scenario.full) {
+      await checkMp4Flow({ page, overlay, actionState, pressShortcut, downloadsDir, box });
       const browserCdp = await context.browser().newBrowserCDPSession();
       await checkServiceWorkerRestart({
         page,
@@ -173,7 +200,8 @@ async function runScenario(scenario) {
 
     if (process.env.EVIDENCE_DIR) {
       mkdirSync(process.env.EVIDENCE_DIR, { recursive: true });
-      copyFileSync(runs[0].path, join(process.env.EVIDENCE_DIR, `e2e-${scenario.scale}x.gif`));
+      const name = scenario.detail ? 'e2e-detail-1280.gif' : `e2e-${scenario.scale}x.gif`;
+      copyFileSync(runs[0].path, join(process.env.EVIDENCE_DIR, name));
     }
   } finally {
     await closeContext(context);
@@ -256,6 +284,11 @@ async function setSlider(slider, value) {
   }, value);
 }
 
+function recordingSeconds(state) {
+  const match = state.title.match(/^GIF-рекордер: запись (\d+) с/);
+  return match ? Number(match[1]) : null;
+}
+
 async function recordOnce({ page, overlay, actionState, pressShortcut, downloadsDir, box, scenario, label }) {
   await pressShortcut();
   await overlay.waitFor({ state: 'attached', timeout: 10000 });
@@ -268,16 +301,20 @@ async function recordOnce({ page, overlay, actionState, pressShortcut, downloads
   await overlay.waitFor({ state: 'detached', timeout: 5000 });
 
   const recordStart = Date.now();
-  await waitFor(async () => (await actionState()).badge !== '', 10000, `${label}: таймер не появился`);
+  await waitFor(async () => recordingSeconds(await actionState()) !== null, 10000, `${label}: таймер не появился`);
+  const started = await actionState();
   await sleep(RECORD_MS);
 
   const during = await actionState();
-  assert.match(during.badge, /^\d+:\d{2}$/, `${label}: таймер в бейдже, получено "${during.badge}"`);
+  assert.ok(recordingSeconds(during) >= 2, `${label}: счётчик секунд не обновляется`);
+  assert.equal(during.badge, '', `${label}: бейдж не должен закрывать счётчик на иконке`);
+  assert.equal(typeof during.iconHash, 'number', `${label}: setIcon не принял изображение`);
+  assert.notEqual(during.iconHash, started.iconHash, `${label}: пиксели иконки не изменились`);
   assert.equal(await page.locator('#gifcap-overlay').count(), 0, `${label}: оверлей должен быть удалён`);
 
   await pressShortcut();
   const recordStop = Date.now();
-  await waitFor(async () => (await actionState()).badge === '', 60000, `${label}: кодирование не завершилось`);
+  await waitFor(async () => /сохранено/.test((await actionState()).title), 60000, `${label}: кодирование не завершилось`);
 
   const state = await actionState();
   const path = await waitForFile(before, downloadsDir, 30000, `${label}: GIF не появился в загрузках`, state);
@@ -304,6 +341,13 @@ async function recordOnce({ page, overlay, actionState, pressShortcut, downloads
     }
   }
 
+  let detailContrast = 0;
+  for (let x = 16; x < 79; x++) {
+    const offset = (20 * reader.width + x) * 4;
+    detailContrast += Math.abs(decoded.firstFrame[offset] - decoded.firstFrame[offset + 4]);
+  }
+  detailContrast /= 63;
+
   return {
     label,
     path,
@@ -318,6 +362,7 @@ async function recordOnce({ page, overlay, actionState, pressShortcut, downloads
     coverage: onTarget / (reader.width * reader.height),
     yellowPixels,
     changed,
+    detailContrast,
   };
 }
 
@@ -347,6 +392,10 @@ function assertRun(run, scenario) {
   );
   assert.ok(run.yellowPixels >= 200, `${label}: движущийся элемент не попал в кадр`);
   assert.ok(run.changed >= 100, `${label}: кадры не меняются (${run.changed} пикселей)`);
+  if (scenario.detail) {
+    assert.ok(run.detailContrast >= 200, `${label}: полосы 1 px размыты (контраст ${run.detailContrast})`);
+    console.log(`${label}: полосы 1 px сохранены, контраст ${run.detailContrast.toFixed(0)}/255`);
+  }
 }
 
 function logRun(run, scenario) {
@@ -386,7 +435,9 @@ function listDownloads(downloadsDir) {
     .map((name) => join(downloadsDir, name))
     .filter((path) => {
       try {
-        return statSync(path).isFile() && readFileSync(path).subarray(0, 4).toString('latin1') === 'GIF8';
+        if (!statSync(path).isFile()) return false;
+        const bytes = readFileSync(path);
+        return bytes.toString('ascii', 0, 4) === 'GIF8' || bytes.toString('ascii', 4, 8) === 'ftyp';
       } catch {
         return false;
       }
@@ -467,13 +518,13 @@ async function checkServiceWorkerRestart({
   await overlay.waitFor({ state: 'detached', timeout: 5000 });
 
   await waitFor(
-    async () => (await actionState()).badge !== '',
+    async () => recordingSeconds(await actionState()) !== null,
     10000,
     'F1: после перезапуска service worker запись не стартовала',
   );
   await sleep(1200);
   await pressShortcut();
-  await waitFor(async () => (await actionState()).badge === '', 60000, 'F1: кодирование не завершилось');
+  await waitFor(async () => /сохранено/.test((await actionState()).title), 60000, 'F1: кодирование не завершилось');
 
   const path = await waitForFile(before, downloadsDir, 30000, 'F1: GIF не появился', actionState);
   const reader = new GifReader(readFileSync(path));
@@ -580,6 +631,103 @@ async function checkRapidStartStop({ page, overlay, actionState, pressShortcut, 
   console.log(`быстрый start/stop: сессия сброшена, бейдж "${state.badge}", оверлей снова открывается`);
 }
 
+async function checkMp4Flow({ page, overlay, actionState, pressShortcut, downloadsDir, box }) {
+  await pressShortcut();
+  await overlay.waitFor({ state: 'attached', timeout: 10000 });
+  const format = page.locator('#gifcap-format');
+  assert.equal(await format.inputValue(), 'gif');
+  if (await format.locator('option[value=mp4]').isDisabled()) {
+    console.log('MP4 не поддерживается этим Chromium — проверка пропущена');
+    await page.keyboard.press('Escape');
+    return;
+  }
+  // Оценка появляется только после асинхронного overlay-init.
+  await waitFor(
+    async () => (await page.locator('#gifcap-estimate').textContent()).startsWith('≈'),
+    5000,
+    'оценка не отрисовалась',
+  );
+  const gifEstimate = await page.locator('#gifcap-estimate').textContent();
+  await format.selectOption('mp4');
+  assert.notEqual(await page.locator('#gifcap-estimate').textContent(), gifEstimate);
+  if (process.env.EVIDENCE_DIR) {
+    mkdirSync(process.env.EVIDENCE_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.EVIDENCE_DIR, 'format-selector.png') });
+  }
+  await page.keyboard.press('Escape');
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+
+  await pressShortcut();
+  await overlay.waitFor({ state: 'attached', timeout: 10000 });
+  await waitFor(async () => (await format.inputValue()) === 'mp4', 5000, 'формат не сохранился');
+  const before = new Set(listDownloads(downloadsDir));
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height - 1, { steps: 10 });
+  await page.mouse.up();
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+  await waitFor(async () => recordingSeconds(await actionState()) !== null, 10000, 'MP4: запись не стартовала');
+  await sleep(RECORD_MS);
+  assert.ok(recordingSeconds(await actionState()) >= 2, 'MP4: счётчик не обновляется');
+  await pressShortcut();
+  await waitFor(async () => /MP4 сохранено/.test((await actionState()).title), 30000, 'MP4 не сохранён');
+
+  const path = await waitForFile(before, downloadsDir, 15000, 'MP4 не скачался', actionState);
+  const bytes = readFileSync(path);
+  assert.equal(bytes.toString('ascii', 4, 8), 'ftyp', 'это должен быть настоящий MP4, не WebM с другим расширением');
+  const playbackData = { base64: bytes.toString('base64'), blue: TARGET_BLUE, yellow: TARGET_YELLOW, tolerance: COLOR_TOLERANCE };
+  const playback = await page.evaluate(async ({ base64, blue, yellow, tolerance }) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('MP4 не декодируется')), 5000);
+        video.onloadeddata = () => { clearTimeout(timer); resolve(); };
+        video.onerror = () => { clearTimeout(timer); reject(new Error(video.error?.message ?? 'ошибка MP4')); };
+        video.src = `data:video/mp4;base64,${base64}`;
+      });
+      await video.play();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      video.pause();
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext('2d');
+      context.drawImage(video, 0, 0);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      const isNearColor = (offset, color) => color.every((value, index) => Math.abs(pixels[offset + index] - value) <= tolerance);
+      let onTarget = 0;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (isNearColor(offset, blue) || isNearColor(offset, yellow)) onTarget++;
+      }
+      return { width: canvas.width, height: canvas.height, time: video.currentTime, duration: video.duration, coverage: onTarget / (pixels.length / 4) };
+    } finally {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+  }, playbackData);
+  assert.equal(playback.width, Math.floor((box.width - 1) / 2) * 2);
+  assert.equal(playback.height, Math.floor((box.height - 1) / 2) * 2);
+  assert.ok(playback.time >= 0.3, 'MP4 должен воспроизводиться');
+  if (Number.isFinite(playback.duration)) {
+    assert.ok(playback.duration >= 2, `MP4 оказался короче записи: ${playback.duration} с`);
+  }
+  assert.ok(playback.coverage >= COVERAGE_MIN, `MP4: неверная область (${playback.coverage})`);
+  if (process.env.EVIDENCE_DIR) {
+    mkdirSync(process.env.EVIDENCE_DIR, { recursive: true });
+    copyFileSync(path, join(process.env.EVIDENCE_DIR, 'e2e.mp4'));
+  }
+  console.log(`MP4: ftyp, ${playback.width}×${playback.height}, воспроизведение ${playback.time.toFixed(2)} с из ${Number.isFinite(playback.duration) ? playback.duration.toFixed(2) : '?'} с, ${(bytes.length / 1024).toFixed(1)} КБ, выбор сохраняется`);
+
+  await pressShortcut();
+  await overlay.waitFor({ state: 'attached', timeout: 10000 });
+  await waitFor(async () => (await format.inputValue()) === 'mp4', 5000, 'формат сбросился после записи');
+  await format.selectOption('gif');
+  await page.keyboard.press('Escape');
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+}
+
 // F3: реальная тяжёлая синтетическая запись (GIF > 2 МиБ) и затем прямая
 // проверка транспорта: тот же настоящий файл отправляется реальным
 // runtime-сообщением из offscreen-контекста и скачивается downloads.download.
@@ -607,11 +755,11 @@ async function checkTransport({
   await overlay.waitFor({ state: 'detached', timeout: 5000 });
 
   const recordStart = Date.now();
-  await waitFor(async () => (await actionState()).badge !== '', 10000, 'F3: запись не стартовала');
+  await waitFor(async () => recordingSeconds(await actionState()) !== null, 10000, 'F3: запись не стартовала');
   await sleep(2500);
   await pressShortcut();
   const wallMs = Date.now() - recordStart;
-  await waitFor(async () => (await actionState()).badge === '', 60000, 'F3: кодирование не завершилось');
+  await waitFor(async () => /сохранено/.test((await actionState()).title), 60000, 'F3: кодирование не завершилось');
 
   const realPath = await waitForFile(before, downloadsDir, 30000, 'F3: тяжёлый GIF не появился', actionState);
   const realBytes = readFileSync(realPath);
@@ -643,7 +791,7 @@ async function checkTransport({
   });
   const beforeTransport = new Set(listDownloads(downloadsDir));
   const expression =
-    `(async () => { await chrome.runtime.sendMessage({ type: 'capture-gif', ` +
+    `(async () => { await chrome.runtime.sendMessage({ type: 'capture-file', format: 'gif', ` +
     `base64: ${JSON.stringify(realBytes.toString('base64'))}, frames: ${reader.numFrames()}, ` +
     `sizeBytes: ${realBytes.length} }); return 'sent'; })()`;
   // Ответа ждать нельзя: service worker закрывает offscreen сразу после скачивания.

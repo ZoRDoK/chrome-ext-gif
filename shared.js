@@ -5,6 +5,7 @@
 import { GIFEncoder, applyPalette, quantize } from './vendor/gifenc.js';
 
 export const QUALITY_DEFAULT = 80;
+export const MP4_FPS = 30;
 
 // Эталон для интерфейсной оценки: столько пользователь видит в подписи.
 export const REFERENCE_SECONDS = 5;
@@ -17,9 +18,6 @@ export const LIMITS = {
   maxFrames: 900,
 };
 
-const PALETTE_SAMPLE_FRAMES = 24;
-const PALETTE_SAMPLE_PIXELS = 400_000;
-const PALETTE_SAMPLE_MS = 2000;
 const COLOR_FORMAT = 'rgb565';
 const MIN_FRAME_DELAY_MS = 20;
 // Задержка кадра в GIF — uint16 в сотых долях секунды: всё, что больше, формат
@@ -59,8 +57,8 @@ export function qualityPlan(quality) {
   const q = clampQuality(quality);
   return {
     fps: Math.round(6 + 0.08 * q),
-    maxSide: Math.round(320 + 4 * q),
-    colors: Math.round(48 + 2.08 * q),
+    maxSide: Math.round(640 + 8 * q),
+    colors: Math.min(256, Math.round(128 + 1.6 * q)),
   };
 }
 
@@ -68,13 +66,20 @@ export function qualityPlan(quality) {
 // панель с текстом, графиком, фото-областью и движущимися элементами):
 // измеренный размер кадра 512×512, байт на кадр при q = 0, 20, …, 100.
 // Значения монотонны, интерполяция между ними тоже. Реальный размер зависит
-// от контента: на плоской панели без фото-области те же 5 с весят в 2–3 раза
-// меньше, поэтому в интерфейсе оценка подписана как приблизительная.
-const REFERENCE_FRAME_BYTES = [17500, 24400, 25100, 25300, 25350, 25400];
+// от контента: плоская панель без фото-области весит заметно меньше,
+// поэтому в интерфейсе оценка подписана как приблизительная.
+const REFERENCE_FRAME_BYTES = [25600, 26000, 26100, 26200, 26300, 26400];
 const REFERENCE_STEP = 20;
 
-export function estimateReferenceBytes(quality) {
+export function mp4Bitrate(quality, width, height) {
+  const bitsPerPixel = 0.08 + clampQuality(quality) / 500;
+  // 6 Мбит/с оставляют запас для минуты видео в одном runtime-сообщении.
+  return Math.min(6_000_000, Math.max(250_000, Math.round(width * height * MP4_FPS * bitsPerPixel)));
+}
+
+export function estimateReferenceBytes(quality, format = 'gif') {
   const q = clampQuality(quality);
+  if (format === 'mp4') return Math.round(mp4Bitrate(q, 512, 512) * REFERENCE_SECONDS / 8);
   const bucket = Math.min(Math.floor(q / REFERENCE_STEP), REFERENCE_FRAME_BYTES.length - 2);
   const ratio = (q - bucket * REFERENCE_STEP) / REFERENCE_STEP;
   const first = REFERENCE_FRAME_BYTES[bucket];
@@ -91,8 +96,8 @@ export function formatBytes(bytes) {
 
 // Подписи для всех положений слайдера считает service worker, чтобы оверлей
 // оставался простым скриптом без импортов.
-export function estimateLabels() {
-  return Array.from({ length: QUALITY_MAX + 1 }, (_, q) => formatBytes(estimateReferenceBytes(q)));
+export function estimateLabels(format = 'gif') {
+  return Array.from({ length: QUALITY_MAX + 1 }, (_, q) => formatBytes(estimateReferenceBytes(q, format)));
 }
 
 // Размер кадра записи: длинная сторона не больше maxSide (без апскейла).
@@ -132,90 +137,34 @@ function clampFrameDelay(delayMs, fallbackMs) {
   return Math.round(clamped / 10) * 10;
 }
 
-function samplePixels(frames, maxPixels) {
-  const perFrame = Math.max(1, Math.floor(maxPixels / frames.length));
-  const pixelCount = frames[0].rgba.length / 4;
-  const stride = Math.max(1, Math.ceil(pixelCount / perFrame));
-  // Буфер заполняется целиком: gifenc читает его как Uint32Array от начала,
-  // а все кадры имеют одинаковый размер.
-  const sample = new Uint8ClampedArray(frames.length * Math.ceil(pixelCount / stride) * 4);
-  let offset = 0;
-
-  for (const frame of frames) {
-    for (let pixel = 0; pixel < pixelCount; pixel += stride) {
-      const source = pixel * 4;
-      sample[offset] = frame.rgba[source];
-      sample[offset + 1] = frame.rgba[source + 1];
-      sample[offset + 2] = frame.rgba[source + 2];
-      sample[offset + 3] = frame.rgba[source + 3];
-      offset += 4;
-    }
-  }
-
-  return sample;
-}
-
-function buildPalette(frames, colors) {
-  const sample = samplePixels(frames, PALETTE_SAMPLE_PIXELS);
-  return quantize(sample, colors, { format: COLOR_FORMAT });
-}
-
-// Потоковый кодировщик: палитра строится один раз по первым кадрам, дальше
-// кадры кодируются сразу и RGBA не копится — память ограничена размером GIF.
+// Каждый кадр получает свою палитру: новые цвета не искажаются палитрой
+// начала записи. RGBA кодируется сразу, без накопления исходных кадров.
 export function createGifEncoder({ width, height, colors, fps }) {
   const intervalMs = 1000 / fps;
   const gif = GIFEncoder();
-  const pending = [];
-  let palette = null;
   let frameCount = 0;
-
-  function writeFrame({ rgba, delayMs }) {
-    const index = applyPalette(rgba, palette, COLOR_FORMAT);
-    const options = {
-      delay: clampFrameDelay(delayMs, intervalMs),
-      repeat: 0,
-    };
-    if (frameCount === 0) options.palette = palette;
-    gif.writeFrame(index, width, height, options);
-    frameCount += 1;
-  }
-
-  function flushPending() {
-    palette = buildPalette(pending, colors);
-    const buffered = pending.splice(0, pending.length);
-    for (const frame of buffered) writeFrame(frame);
-  }
 
   return {
     addFrame(rgba, delayMs) {
-      if (palette) {
-        writeFrame({ rgba, delayMs });
-        return;
-      }
-
-      pending.push({ rgba, delayMs });
-      const bufferedMs = pending.reduce(
-        (sum, frame) => sum + clampFrameDelay(frame.delayMs, intervalMs),
-        0,
-      );
-      if (pending.length >= PALETTE_SAMPLE_FRAMES || bufferedMs >= PALETTE_SAMPLE_MS) {
-        flushPending();
-      }
+      const palette = quantize(rgba, colors, { format: COLOR_FORMAT });
+      const index = applyPalette(rgba, palette, COLOR_FORMAT);
+      const options = {
+        palette,
+        delay: clampFrameDelay(delayMs, intervalMs),
+        repeat: 0,
+      };
+      gif.writeFrame(index, width, height, options);
+      frameCount += 1;
     },
 
     finish() {
-      if (!palette) {
-        if (pending.length === 0) {
-          throw new Error('нет кадров для кодирования');
-        }
-        flushPending();
-      }
+      if (frameCount === 0) throw new Error('нет кадров для кодирования');
       gif.finish();
       return gif.bytes();
     },
 
     get frameCount() {
-      return frameCount + pending.length;
+      return frameCount;
     },
   };
 }

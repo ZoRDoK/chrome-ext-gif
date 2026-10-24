@@ -1,6 +1,6 @@
 // Service worker: жест пользователя -> выделение области -> offscreen-запись
-// -> скачивание GIF. Сам кадры не пишет: getUserMedia, canvas и кодирование
-// доступны только offscreen-документу, а chrome.downloads — только здесь.
+// -> скачивание файла. Поток и кадры обрабатывает offscreen-документ;
+// здесь живут управление, иконка-счётчик и chrome.downloads.
 import {
   LIMITS,
   QUALITY_DEFAULT,
@@ -21,6 +21,7 @@ const MIN_SELECTION_SIDE = 8;
 let state = STATE.IDLE;
 let overlayTabId = null;
 let captureTabId = null;
+let captureFormat = 'gif';
 let offscreenCreation = null;
 let captureStart = null;
 let hydration = null;
@@ -37,6 +38,7 @@ function hydrateSession() {
       state = saved.state ?? STATE.IDLE;
       overlayTabId = saved.overlayTabId ?? null;
       captureTabId = saved.captureTabId ?? null;
+      captureFormat = saved.format === 'mp4' ? 'mp4' : 'gif';
     });
   }
   return hydration;
@@ -44,7 +46,7 @@ function hydrateSession() {
 
 function saveSession() {
   return chrome.storage.session.set({
-    [SESSION_KEY]: { state, overlayTabId, captureTabId },
+    [SESSION_KEY]: { state, overlayTabId, captureTabId, format: captureFormat },
   });
 }
 
@@ -95,8 +97,8 @@ async function handleTabRemoved(tabId) {
 }
 
 async function buildOverlayInit() {
-  const quality = await readQuality();
-  return { quality, labels: estimateLabels() };
+  const settings = await readSettings();
+  return { ...settings, labels: estimateLabels(), mp4Labels: estimateLabels('mp4') };
 }
 
 async function handleMessage(message, sender) {
@@ -115,14 +117,17 @@ async function handleMessage(message, sender) {
     case 'overlay-quality':
       await chrome.storage.local.set({ quality: clampQuality(message.quality) });
       break;
+    case 'overlay-format':
+      await chrome.storage.local.set({ format: message.format === 'mp4' ? 'mp4' : 'gif' });
+      break;
     case 'capture-started':
-      await setBadge('0:00', BADGE_COLOR_RECORDING);
+      await showElapsed(0);
       break;
     case 'capture-tick':
       await showElapsed(message.elapsedMs);
       break;
-    case 'capture-gif':
-      await onGifReady(message);
+    case 'capture-file':
+      await onFileReady(message);
       break;
     case 'capture-error':
       await onCaptureError(message.message);
@@ -143,10 +148,10 @@ async function toggle() {
   if (state === STATE.IDLE) {
     // Новое действие сбрасывает бейдж и подсказку прошлой ошибки: сервис-воркер
     // не может надёжно полагаться на setTimeout.
-    await setBadge('', BADGE_COLOR_RECORDING);
+    await showStatus('', BADGE_COLOR_RECORDING);
     await startSelection();
   }
-  // ENCODING: GIF уже собирается, повторный запуск потерял бы запись.
+  // ENCODING: файл уже собирается, повторный запуск потерял бы запись.
 }
 
 async function startSelection() {
@@ -201,6 +206,7 @@ async function beginCapture(tabId, message) {
   state = transition(state, 'selected');
   overlayTabId = null;
   captureTabId = tabId;
+  captureFormat = message.format === 'mp4' ? 'mp4' : 'gif';
   await saveSession();
 
   captureStart = startCapture(tabId, message);
@@ -216,7 +222,7 @@ async function beginCapture(tabId, message) {
 
 async function startCapture(tabId, message) {
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-  const quality = await readQuality();
+  const { quality } = await readSettings();
   await ensureOffscreen();
 
   // Пока создавался offscreen, пользователь мог нажать стоп: стартовать уже нечего.
@@ -224,6 +230,7 @@ async function startCapture(tabId, message) {
 
   await chrome.runtime.sendMessage({
     type: 'capture-start',
+    format: captureFormat,
     streamId,
     rect: message.rect,
     viewport: message.viewport,
@@ -234,7 +241,7 @@ async function startCapture(tabId, message) {
 
 async function stopRecording() {
   state = transition(state, 'stop');
-  await setBadge('gif', BADGE_COLOR_ENCODING);
+  await showStatus(captureFormat, BADGE_COLOR_ENCODING);
   await saveSession();
 
   try {
@@ -246,7 +253,7 @@ async function stopRecording() {
       // Offscreen-документ не ведёт запись: сессию нужно сбросить, иначе бейдж
       // 'gif' завис бы до следующего действия пользователя.
       await resetSession();
-      await setBadge('', BADGE_COLOR_ENCODING);
+      await showStatus('', BADGE_COLOR_ENCODING);
     }
   } catch (error) {
     await onCaptureError(`не удалось остановить запись (${error.message})`);
@@ -255,17 +262,17 @@ async function stopRecording() {
 
 async function showElapsed(elapsedMs) {
   if (state !== STATE.RECORDING) return;
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = String(totalSeconds % 60).padStart(2, '0');
-  await setBadge(`${minutes}:${seconds}`, BADGE_COLOR_RECORDING);
+  const seconds = Math.floor(elapsedMs / 1000);
+  await showStatus(String(seconds), BADGE_COLOR_RECORDING);
 }
 
-async function onGifReady(message) {
+async function onFileReady(message) {
+  const format = message.format === 'mp4' ? 'mp4' : 'gif';
+  const mimeType = format === 'mp4' ? 'video/mp4' : 'image/gif';
   const stamp = new Date().toISOString().slice(0, 19).replaceAll(':', '-');
   const download = {
-    url: `data:image/gif;base64,${message.base64}`,
-    filename: `gif-${stamp}.gif`,
+    url: `data:${mimeType};base64,${message.base64}`,
+    filename: `${format}-${stamp}.${format}`,
     conflictAction: 'uniquify',
     saveAs: false,
   };
@@ -273,27 +280,27 @@ async function onGifReady(message) {
   try {
     await chrome.downloads.download(download);
   } catch (error) {
-    await onCaptureError(`не удалось скачать GIF (${error.message})`);
+    await onCaptureError(`не удалось скачать ${format.toUpperCase()} (${error.message})`);
     return;
   }
 
   await resetSession();
   const size = `${Math.max(1, Math.round(message.sizeBytes / 1024))} КБ`;
-  await setBadge('', BADGE_COLOR_ENCODING);
-  await chrome.action.setTitle({
-    title: `GIF-рекордер: сохранено ${message.frames} кадров, ${size} — файл в Загрузках`,
-  });
+  await showStatus('', BADGE_COLOR_ENCODING);
+  const summary = format === 'mp4' ? 'MP4 сохранено' : `сохранено ${message.frames} кадров`;
+  await chrome.action.setTitle({ title: `GIF-рекордер: ${summary}, ${size} — файл в Загрузках` });
 }
 
 async function onCaptureError(message) {
   await resetSession();
-  await setBadge('!', BADGE_COLOR_ERROR);
+  await showStatus('!', BADGE_COLOR_ERROR);
   await chrome.action.setTitle({ title: `GIF-рекордер: ${message}` });
 }
 
 async function resetSession() {
   overlayTabId = null;
   captureTabId = null;
+  captureFormat = 'gif';
   state = STATE.IDLE;
   await saveSession();
   try {
@@ -312,7 +319,7 @@ async function ensureOffscreen() {
   if (contexts.length > 0) return;
 
   if (!offscreenCreation) {
-    const justification = 'Запись области вкладки в GIF: getUserMedia, canvas и кодирование';
+    const justification = 'Запись области вкладки в GIF или MP4: getUserMedia, canvas и кодирование';
     offscreenCreation = chrome.offscreen
       .createDocument({ url: OFFSCREEN_PATH, reasons: ['USER_MEDIA'], justification })
       .finally(() => {
@@ -322,13 +329,34 @@ async function ensureOffscreen() {
   await offscreenCreation;
 }
 
-async function setBadge(text, color) {
-  await chrome.action.setBadgeBackgroundColor({ color });
-  await chrome.action.setBadgeText({ text });
-  if (text === '') await chrome.action.setTitle({ title: DEFAULT_TITLE });
+async function showStatus(text, color) {
+  const isTimer = /^\d+$/.test(text);
+  const label = text || 'GIF';
+  const canvas = new OffscreenCanvas(32, 32);
+  const context = canvas.getContext('2d');
+  context.fillStyle = text ? color : '#334155';
+  context.fillRect(0, 0, 32, 32);
+  context.fillStyle = '#ffffff';
+  context.font = `bold ${label.length > 2 ? 14 : 24}px sans-serif`;
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(label, 16, 17, 30);
+
+  let title = DEFAULT_TITLE;
+  if (isTimer) title = `GIF-рекордер: запись ${text} с — нажмите, чтобы остановить`;
+  else if (text === 'gif' || text === 'mp4') title = `GIF-рекордер: сохраняю ${text.toUpperCase()}…`;
+  await Promise.all([
+    chrome.action.setIcon({ imageData: context.getImageData(0, 0, 32, 32) }),
+    chrome.action.setBadgeBackgroundColor({ color }),
+    chrome.action.setBadgeText({ text: isTimer ? '' : text }),
+    chrome.action.setTitle({ title }),
+  ]);
 }
 
-async function readQuality() {
-  const stored = await chrome.storage.local.get('quality');
-  return clampQuality(stored.quality ?? QUALITY_DEFAULT);
+async function readSettings() {
+  const stored = await chrome.storage.local.get(['quality', 'format']);
+  return {
+    quality: clampQuality(stored.quality ?? QUALITY_DEFAULT),
+    format: stored.format === 'mp4' ? 'mp4' : 'gif',
+  };
 }

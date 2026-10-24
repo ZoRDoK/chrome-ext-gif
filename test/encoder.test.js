@@ -9,6 +9,7 @@ import {
   createGifEncoder,
   estimateReferenceBytes,
   formatBytes,
+  outputSize,
   qualityPlan,
 } from '../shared.js';
 import { makeDashboardFrame, makePanelFrame } from './frames.js';
@@ -17,7 +18,7 @@ const SIZE = 512;
 const SECONDS = 5;
 // Калибровочная таблица из shared.js: байт на кадр 512×512 при q = 0, 20, …, 100.
 const CALIBRATION_QUALITIES = [0, 20, 40, 60, 80, 100];
-const CALIBRATION_FRAME_BYTES = [17500, 24400, 25100, 25300, 25350, 25400];
+const CALIBRATION_FRAME_BYTES = [25600, 26000, 26100, 26200, 26300, 26400];
 const CALIBRATION_TOLERANCE = 0.35;
 
 function encodeScene(makeFrame, quality, seconds = SECONDS) {
@@ -62,7 +63,7 @@ test('GIF читается независимым декодером: кадры
   for (let i = 0; i < frameCount; i++) {
     const info = reader.frameInfo(i);
     assert.equal(info.delay, expectedDelay, `кадр ${i}: задержка в 1/100 с`);
-    assert.equal(info.has_local_palette, false, 'кадры используют общую палитру');
+    assert.equal(info.has_local_palette, i > 0, 'каждый следующий кадр получает свою палитру');
     assert.ok(info.palette_size <= 256);
     totalDelay += info.delay;
   }
@@ -111,6 +112,82 @@ test('задержки кадров: минимум 20 мс, длинные па
   );
 });
 
+/** @param {unknown[]} delays */
+function encodePattern(delays) {
+  const encoder = createGifEncoder({ width: 11, height: 7, colors: 32, fps: 12 });
+  assert.equal(encoder.frameCount, 0);
+
+  delays.forEach((delay, index) => {
+    const rgba = new Uint8ClampedArray(11 * 7 * 4);
+    for (let pixel = 0; pixel < rgba.length / 4; pixel++) {
+      rgba[pixel * 4] = (pixel * 17 + index * 29) % 256;
+      rgba[pixel * 4 + 1] = (pixel * 37 + index * 11) % 256;
+      rgba[pixel * 4 + 2] = (pixel * 7 + index * 53) % 256;
+      rgba[pixel * 4 + 3] = 255;
+    }
+    encoder.addFrame(rgba, delay);
+    assert.equal(encoder.frameCount, index + 1);
+  });
+
+  const bytes = encoder.finish();
+  const reader = decode(bytes);
+  assert.equal(encoder.frameCount, delays.length);
+  assert.equal(reader.numFrames(), delays.length);
+
+  return { reader };
+}
+
+test('один кадр: finish сохраняет размер, палитру и fallback-задержку', () => {
+  const { reader } = encodePattern([undefined]);
+  assert.equal(reader.width, 11);
+  assert.equal(reader.height, 7);
+  assert.equal(reader.frameInfo(0).delay, 8);
+  assert.equal(reader.frameInfo(0).has_local_palette, false);
+  assert.ok(reader.frameInfo(0).palette_size <= 32);
+});
+
+test('новые цвета после 24 кадров и двух секунд не портятся палитрой начала записи', () => {
+  const encoder = createGifEncoder({ width: 32, height: 32, colors: 16, fps: 12 });
+  const blue = new Uint8ClampedArray(32 * 32 * 4);
+  const orange = new Uint8ClampedArray(32 * 32 * 4);
+  for (let offset = 0; offset < blue.length; offset += 4) {
+    blue.set([0, 0, 255, 255], offset);
+    orange.set([255, 96, 0, 255], offset);
+  }
+  for (let frame = 0; frame < 25; frame++) encoder.addFrame(blue, 100);
+  encoder.addFrame(orange, 100);
+
+  const reader = decode(encoder.finish());
+  assert.equal(reader.numFrames(), 26);
+  assert.equal(reader.frameInfo(25).has_local_palette, true);
+  const actual = pixelAt(reader, 25, 16, 16);
+  const expected = [255, 96, 0, 255];
+  assert.ok(actual.every((channel, index) => Math.abs(channel - expected[index]) <= 8), `${actual}`);
+});
+
+test('округление и fallback сохраняются с отдельной палитрой каждого кадра', () => {
+  const rounded = encodePattern([995, 995, 20]);
+  const fallback = encodePattern([1920, undefined, 20]);
+  assert.deepEqual(
+    [0, 1, 2].map((index) => rounded.reader.frameInfo(index).delay),
+    [100, 100, 2],
+  );
+  assert.deepEqual(
+    [0, 1, 2].map((index) => fallback.reader.frameInfo(index).delay),
+    [192, 8, 2],
+  );
+  assert.equal(rounded.reader.frameInfo(2).has_local_palette, true);
+});
+
+test('fallback, минимум и длинные задержки сохраняются для каждого кадра', () => {
+  const delays = [undefined, NaN, Infinity, -Infinity, 0, -1, '33', 5, 25, 33, 5000, 700_000, undefined, 70];
+  const { reader } = encodePattern(delays);
+  assert.deepEqual(
+    delays.map((_, index) => reader.frameInfo(index).delay),
+    [8, 8, 8, 8, 8, 8, 8, 2, 3, 3, 500, 65_535, 8, 7],
+  );
+});
+
 test('качество 0..100: параметры не убывают, оценка строго растёт, размер растёт', () => {
   const plans = Array.from({ length: 101 }, (_, q) => qualityPlan(q));
   for (let q = 1; q <= 100; q++) {
@@ -129,6 +206,13 @@ test('качество 0..100: параметры не убывают, оцен�
     high.bytes.length > low.bytes.length,
     `q=100 (${high.bytes.length} Б) должен быть больше q=20 (${low.bytes.length} Б)`,
   );
+});
+
+test('default 80: вдвое больше разрешение и полная палитра без апскейла', () => {
+  const plan = qualityPlan(QUALITY_DEFAULT);
+  assert.deepEqual(plan, { fps: 12, maxSide: 1280, colors: 256 });
+  assert.deepEqual(outputSize(1920, 1080, plan.maxSide), { width: 1280, height: 720 });
+  assert.deepEqual(outputSize(512, 512, plan.maxSide), { width: 512, height: 512 });
 });
 
 test('оценка для default 80 попадает в целевые 1-2 МиБ на 5 с 512×512', () => {

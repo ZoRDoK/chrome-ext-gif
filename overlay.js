@@ -63,6 +63,28 @@
   title.textContent = 'Выделите область на странице — запись начнётся сразу';
   setStyles(title, { fontWeight: '600', marginBottom: '10px' });
 
+  const formatLabel = document.createElement('label');
+  formatLabel.textContent = 'Формат';
+  setStyles(formatLabel, { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' });
+  const formatInput = document.createElement('select');
+  formatInput.id = 'gifcap-format';
+  formatInput.disabled = true;
+  formatLabel.htmlFor = formatInput.id;
+  const isMp4Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/mp4');
+  for (const format of ['gif', 'mp4']) {
+    const option = document.createElement('option');
+    option.value = format;
+    option.textContent = format === 'mp4' && !isMp4Supported
+      ? 'MP4 — недоступен в этом Chrome' : format.toUpperCase();
+    option.disabled = format === 'mp4' && !isMp4Supported;
+    formatInput.appendChild(option);
+  }
+  setStyles(formatInput, {
+    padding: '4px 8px', borderRadius: '4px', border: '1px solid #475569',
+    background: '#1e293b', color: '#e2e8f0', font: 'inherit',
+  });
+  formatLabel.appendChild(formatInput);
+
   const estimateLine = document.createElement('div');
   setStyles(estimateLine, { display: 'flex', alignItems: 'baseline', gap: '8px' });
 
@@ -79,22 +101,24 @@
   estimateLine.append(estimateValue, estimateCaption);
 
   const slider = document.createElement('input');
+  slider.id = 'gifcap-quality';
   slider.type = 'range';
   slider.min = '0';
   slider.max = '100';
   slider.step = '1';
-  slider.setAttribute('aria-label', 'Качество GIF');
+  slider.setAttribute('aria-label', 'Качество записи');
   setStyles(slider, { width: '100%', margin: '10px 0 6px', accentColor: '#38bdf8' });
 
-  const caption = document.createElement('div');
-  caption.textContent = 'Оценка приблизительная: зависит от контента, области и длительности.';
-  setStyles(caption, { fontSize: '12px', color: '#94a3b8' });
+  const caption = document.createElement('label');
+  caption.htmlFor = slider.id;
+  caption.textContent = 'Качество: меньше файл ← → чётче изображение';
+  setStyles(caption, { display: 'block', fontSize: '12px', color: '#94a3b8' });
 
   const hint = document.createElement('div');
   hint.textContent = 'ЛКМ — выделить · Esc — отмена';
   setStyles(hint, { fontSize: '12px', color: '#64748b', marginTop: '6px' });
 
-  panel.append(title, estimateLine, slider, caption, hint);
+  panel.append(title, formatLabel, estimateLine, slider, caption, hint);
   root.append(veil, selection, sizeTag, panel);
   document.documentElement.appendChild(host);
 
@@ -102,6 +126,10 @@
   let dragStart = null;
 
   panel.addEventListener('pointerdown', (event) => event.stopPropagation());
+  formatInput.addEventListener('change', () => {
+    renderEstimate();
+    chrome.runtime.sendMessage({ type: 'overlay-format', format: formatInput.value }).catch(() => {});
+  });
   slider.addEventListener('input', () => {
     renderEstimate();
     chrome.runtime.sendMessage({ type: 'overlay-quality', quality: Number(slider.value) }).catch(() => {});
@@ -121,8 +149,10 @@
     .sendMessage({ type: 'overlay-init' })
     .then((init) => {
       if (!init) return;
-      labels = init.labels;
+      labels = { gif: init.labels, mp4: init.mp4Labels };
       slider.value = String(init.quality);
+      formatInput.value = init.format === 'mp4' && isMp4Supported ? 'mp4' : 'gif';
+      formatInput.disabled = false;
       renderEstimate();
     })
     .catch(() => {});
@@ -133,7 +163,8 @@
 
   function renderEstimate() {
     if (!labels) return;
-    estimateValue.textContent = `≈ ${labels[Number(slider.value)]}`;
+    estimateValue.textContent = `≈ ${labels[formatInput.value][Number(slider.value)]}`;
+    estimateCaption.textContent = `примерный размер ${formatInput.value.toUpperCase()} для 5 с, 512×512`;
   }
 
   function rectFromPoints(start, end) {
@@ -191,8 +222,13 @@
 
     finish({
       type: 'overlay-selected',
+      format: formatInput.value,
       rect,
-      viewport: { width: window.innerWidth, height: window.innerHeight },
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio,
+      },
     });
   }
 

@@ -106,6 +106,6 @@ test('подписи размера для слайдера: 101 значени�
   for (const label of labels) {
     assert.match(label, /^(?:\d+|\d+,\d) (?:КБ|МБ)$/);
   }
-  assert.equal(labels[0], '513 КБ');
+  assert.equal(labels[0], '750 КБ');
   assert.equal(labels[80], '1,5 МБ');
 });
